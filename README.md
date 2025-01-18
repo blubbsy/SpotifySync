@@ -1,8 +1,5 @@
 # SpotifySync
 
-## Author
-Your Name
-
 ## Description
 SpotifySync is a Python script that synchronizes playlists from Apple Music to Spotify. It fetches tracks from an Apple Music playlist, searches for them on Spotify, and adds them to a specified Spotify playlist. If the Spotify playlist does not exist, it will be created automatically.
 
