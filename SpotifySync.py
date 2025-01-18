@@ -6,7 +6,6 @@ import os  # Used for interacting with the operating system (e.g., checking if a
 from urllib.parse import quote  # Used for URL-encoding query parameters
 import re  # Used for regular expressions to find specific HTML tags
 
-
 # Spotify API credentials
 CLIENT_ID = '464bf181392546bc9b148a7560727850'
 CLIENT_SECRET = '09a0e89876c94108bec7447d08d4bbbd'
@@ -15,8 +14,18 @@ REDIRECT_URI = 'https://github.com/blubbsy/SpotifySync'
 # Spotify playlist details
 PLAYLISTS = [
     {
+        # Tilmos 2424 Playlist
         'applemusic_playlist_url': 'https://music.apple.com/de/playlist/2424/pl.u-leyl1q6hMNDZd7X',
         'spotify_playlist_id': '4rz9bzNtfKnRKlUt62ds1F',
+        'name': '2424',
+        'description': 'Tilmos 2424 Playlist'
+    },
+    {
+        # Tilmos Lieblingstape
+        'applemusic_playlist_url': 'https://music.apple.com/de/playlist/lieblingstape/pl.u-Ymb0vd5Ig5EbzWA',
+        'spotify_playlist_id': '7kxR1HthTZoYf5HEOBQAIz',
+        'name': 'Lieblingstape',
+        'description': 'Tilmos Lieblingstape'
     },
 ]
 
@@ -117,15 +126,57 @@ class SpotifyAPI:
             'Authorization': f'Bearer {self.access_token}',
             'Content-Type': 'application/json',
         }
+        success = True
+        for i in range(0, len(track_uris), 50):
+            batch = track_uris[i:i+50]
+            data = json.dumps({
+                'uris': batch,
+            })
+            response = requests.post(f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks', headers=headers, data=data)
+            if response.status_code != 201:
+                print(f"Failed to add tracks to Spotify playlist {playlist_id}: {response.text}")
+                success = False
+            else:
+                print(f"Successfully added {len(batch)} tracks to Spotify playlist {playlist_id}")
+        return success
+
+    def create_playlist(self, user_id, name, description):
+        """
+        Create a new Spotify playlist.
+        """
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json',
+        }
         data = json.dumps({
-            'uris': track_uris,
+            'name': name,
+            'description': description,
+            'public': False
         })
-        response = requests.post(f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks', headers=headers, data=data)
+        response = requests.post(f'https://api.spotify.com/v1/users/{user_id}/playlists', headers=headers, data=data)
         if response.status_code == 201:
-            print(f"Successfully added {len(track_uris)} tracks to Spotify playlist {playlist_id}")
+            playlist_id = response.json()['id']
+            print(f"Successfully created playlist {name} with ID {playlist_id}")
+            return playlist_id
         else:
-            print(f"Failed to add tracks to Spotify playlist {playlist_id}: {response.text}")
-        return response.status_code == 201
+            print(f"Failed to create playlist {name}: {response.text}")
+            return None
+
+    def get_user_id(self):
+        """
+        Get the Spotify user ID of the current user.
+        """
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+        }
+        response = requests.get('https://api.spotify.com/v1/me', headers=headers)
+        if response.status_code == 200:
+            user_id = response.json()['id']
+            print(f"User ID obtained: {user_id}")
+            return user_id
+        else:
+            print(f"Failed to get user ID: {response.text}")
+            return None
 
 class AppleMusicScraper:
     @staticmethod
@@ -200,7 +251,21 @@ class PlaylistSync:
         """
         Sync Apple Music playlists to Spotify.
         """
+        user_id = self.spotify_api.get_user_id()
+        if not user_id:
+            print("Failed to get Spotify user ID. Exiting.")
+            return
+
         for playlist in self.playlists:
+            # Check if the playlist exists, if not, create it
+            if not playlist['spotify_playlist_id']:
+                playlist_id = self.spotify_api.create_playlist(user_id, playlist['name'], playlist['description'])
+                if playlist_id:
+                    playlist['spotify_playlist_id'] = playlist_id
+                else:
+                    print(f"Failed to create playlist {playlist['name']}. Skipping.")
+                    continue
+
             # Fetch songs from Apple Music
             apple_music_tracks = AppleMusicScraper.get_playlist_tracks(playlist['applemusic_playlist_url'])
             
