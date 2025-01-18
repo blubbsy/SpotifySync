@@ -1,15 +1,24 @@
-import requests
-import base64
-import json
-from bs4 import BeautifulSoup
-import os
-import re
-from fuzzywuzzy import fuzz
+import requests  # Used for making HTTP requests to the Spotify and Apple Music APIs
+import base64  # Used for encoding client credentials for Spotify API authentication
+import json  # Used for parsing JSON responses from APIs
+from bs4 import BeautifulSoup  # Used for parsing HTML content from Apple Music pages
+import os  # Used for interacting with the operating system (e.g., checking if a file exists)
+from urllib.parse import quote  # Used for URL-encoding query parameters
+import re  # Used for regular expressions to find specific HTML tags
+
 
 # Spotify API credentials
 CLIENT_ID = '464bf181392546bc9b148a7560727850'
 CLIENT_SECRET = '09a0e89876c94108bec7447d08d4bbbd'
 REDIRECT_URI = 'https://github.com/blubbsy/SpotifySync'
+
+# Spotify playlist details
+PLAYLISTS = [
+    {
+        'applemusic_playlist_url': 'https://music.apple.com/de/playlist/2424/pl.u-leyl1q6hMNDZd7X',
+        'spotify_playlist_id': '4rz9bzNtfKnRKlUt62ds1F',
+    },
+]
 
 class SpotifyAPI:
     def __init__(self, client_id, client_secret, redirect_uri, code=None, refresh_token=None):
@@ -39,6 +48,8 @@ class SpotifyAPI:
         response_data = response.json()
         self.access_token = response_data['access_token']
         self.refresh_token = response_data['refresh_token']
+        print(f"Access token obtained: {self.access_token}")
+        print(f"Refresh token obtained: {self.refresh_token}")
 
     def get_access_token(self):
         """
@@ -55,7 +66,9 @@ class SpotifyAPI:
         }
         response = requests.post('https://accounts.spotify.com/api/token', headers=headers, data=data)
         response_data = response.json()
-        return response_data['access_token']
+        self.access_token = response_data['access_token']
+        print(f"New access token obtained: {self.access_token}")
+        return self.access_token
 
     def get_playlist_tracks(self, playlist_id):
         """
@@ -64,9 +77,19 @@ class SpotifyAPI:
         headers = {
             'Authorization': f'Bearer {self.access_token}',
         }
-        response = requests.get(f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks', headers=headers)
-        response_data = response.json()
-        return [{'name': item['track']['name'], 'artists': [artist['name'] for artist in item['track']['artists']], 'id': item['track']['id']} for item in response_data['items']]
+        tracks = []
+        limit = 100
+        offset = 0
+        while True:
+            response = requests.get(f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks?limit={limit}&offset={offset}', headers=headers)
+            response_data = response.json()
+            items = response_data['items']
+            tracks.extend([{'title': item['track']['name'], 'artists': [artist['name'] for artist in item['track']['artists']], 'id': item['track']['id']} for item in items])
+            if len(items) < limit:
+                break
+            offset += limit
+        print(f"Fetched {len(tracks)} tracks from Spotify playlist {playlist_id}")
+        return tracks
 
     def search_track(self, track_title, artists):
         """
@@ -76,11 +99,14 @@ class SpotifyAPI:
             'Authorization': f'Bearer {self.access_token}',
         }
         query = f"track:{track_title} artist:{' '.join(artists)}"
-        response = requests.get(f'https://api.spotify.com/v1/search?q={query}&type=track', headers=headers)
+        encoded_query = quote(query)
+        response = requests.get(f'https://api.spotify.com/v1/search?q={encoded_query}&type=track', headers=headers)
         response_data = response.json()
         tracks = response_data.get('tracks', {}).get('items', [])
         if tracks:
+            print(f"Found track on Spotify: {tracks[0]['name']} by {', '.join([artist['name'] for artist in tracks[0]['artists']])}")
             return tracks[0]['uri'], tracks[0]['id']
+        print(f"Track not found on Spotify: {track_title} by {', '.join(artists)}")
         return None, None
 
     def add_tracks_to_playlist(self, playlist_id, track_uris):
@@ -95,6 +121,10 @@ class SpotifyAPI:
             'uris': track_uris,
         })
         response = requests.post(f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks', headers=headers, data=data)
+        if response.status_code == 201:
+            print(f"Successfully added {len(track_uris)} tracks to Spotify playlist {playlist_id}")
+        else:
+            print(f"Failed to add tracks to Spotify playlist {playlist_id}: {response.text}")
         return response.status_code == 201
 
 class AppleMusicScraper:
@@ -149,39 +179,45 @@ class PlaylistSync:
         self.spotify_api = spotify_api
         self.playlists = playlists
 
-    def is_similar(self, track1, track2):
+    def track_exists_in_spotify(self, track_id, spotify_track_ids):
         """
-        Check if two tracks are similar based on title and artists.
+        Check if a track already exists in the Spotify playlist by ID.
         """
-        title_similarity = fuzz.ratio(track1['title'], track2['title'])
-        artists_similarity = fuzz.ratio(', '.join(track1['artists']), ', '.join(track2['artists']))
-        return title_similarity > 80 and artists_similarity > 80
+        return track_id in spotify_track_ids
+
+    def get_new_tracks(self, apple_music_tracks, spotify_track_ids):
+        """
+        Get the list of new tracks that are not in the Spotify playlist.
+        """
+        new_tracks = []
+        for track in apple_music_tracks:
+            track_uri, track_id = self.spotify_api.search_track(track['title'], track['artists'])
+            if track_id and not self.track_exists_in_spotify(track_id, spotify_track_ids):
+                new_tracks.append({'uri': track_uri, 'track': track})
+        return new_tracks
 
     def sync_playlists(self):
         """
         Sync Apple Music playlists to Spotify.
         """
         for playlist in self.playlists:
+            # Fetch songs from Apple Music
             apple_music_tracks = AppleMusicScraper.get_playlist_tracks(playlist['applemusic_playlist_url'])
-            spotify_tracks = self.spotify_api.get_playlist_tracks(playlist['spotify_playlist_id'])
             
-            # Extract track IDs from Spotify tracks
+            # Fetch existing songs from Spotify playlist
+            spotify_tracks = self.spotify_api.get_playlist_tracks(playlist['spotify_playlist_id'])
             spotify_track_ids = {track['id'] for track in spotify_tracks}
             
-            new_tracks = []
-            added_tracks = []
-            for track in apple_music_tracks:
-                track_uri, track_id = self.spotify_api.search_track(track['title'], track['artists'])
-                if track_id and track_id not in spotify_track_ids:
-                    new_tracks.append(track_uri)
-                    added_tracks.append(track)
-                elif not track_id:
-                    print(f"Track not found on Spotify: {track['title']} by {', '.join(track['artists'])}")
+            # Search for Apple Music tracks on Spotify
+            new_tracks = self.get_new_tracks(apple_music_tracks, spotify_track_ids)
+            track_uris = [track['uri'] for track in new_tracks]
+            added_tracks = [track['track'] for track in new_tracks]
             
-            if new_tracks:
-                success = self.spotify_api.add_tracks_to_playlist(playlist['spotify_playlist_id'], new_tracks)
+            # Add new tracks to Spotify playlist
+            if track_uris:
+                success = self.spotify_api.add_tracks_to_playlist(playlist['spotify_playlist_id'], track_uris)
                 if success:
-                    print(f"Added {len(new_tracks)} new tracks to Spotify playlist {playlist['spotify_playlist_id']}")
+                    print(f"Added {len(track_uris)} new tracks to Spotify playlist {playlist['spotify_playlist_id']}")
                     print("Tracks added:")
                     for track in added_tracks:
                         print(f"{track['title']} by {', '.join(track['artists'])}")
@@ -216,17 +252,5 @@ if __name__ == '__main__':
         # Initialize Spotify API with the refresh token
         spotify_api = SpotifyAPI(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, refresh_token=refresh_token)
 
-    # Spotify playlist details
-    playlists = [
-        {
-            'applemusic_playlist_url': 'https://music.apple.com/de/playlist/2424/pl.u-leyl1q6hMNDZd7X',
-            'spotify_playlist_id': '4rz9bzNtfKnRKlUt62ds1F',
-        },
-        #{
-        #    'applemusic_playlist_url': 'https://music.apple.com/us/playlist/xxx/pl.xxx',
-        #    'spotify_playlist_id': 'xxx',
-        #},
-    ]
-
-    playlist_sync = PlaylistSync(spotify_api, playlists)
+    playlist_sync = PlaylistSync(spotify_api, PLAYLISTS)
     playlist_sync.sync_playlists()
